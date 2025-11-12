@@ -38,3 +38,4 @@ outputs/dashboards/*.html
 
 # Keep structure but ignore CSVs in archive
 data/archive/**/*.csv
+.Rhistory
