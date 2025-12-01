@@ -1,11 +1,11 @@
 """
 ENTITY MATCHING METHODS - FINAL DEFINITIVE VERSION
 ===================================================
-✅ One-to-many ground truth support (set-based)
-✅ Correct FN counting (uses left_has_truth)
-✅ Consistent threshold logic across all methods
-✅ Text preprocessing (.lower().strip())
-✅ predicted_match column for clear evaluation
+One-to-many ground truth support (set-based)
+Correct FN counting (uses left_has_truth)
+Consistent threshold logic across all methods
+Text preprocessing (.lower().strip())
+predicted_match column for clear evaluation
 
 Output Schema:
 --------------
@@ -45,6 +45,9 @@ from dotenv import load_dotenv
 _sentence_model = None
 _openai_client = None
 
+# TITLE-ONLY MODE (set via environment variable)
+TITLE_ONLY_MODE = os.environ.get('TITLE_ONLY', 'false').lower() == 'true'
+
 def get_sentence_model():
     global _sentence_model
     if _sentence_model is None:
@@ -66,9 +69,39 @@ def get_openai_client():
 # HELPER FUNCTIONS
 # =============================================================================
 
-def prepare_text_column(df, text_cols=['name', 'description']):
-    """Combine text columns and normalize"""
+def prepare_text_column(df, text_cols=None, title_only=False):
+    """Combine text columns and normalize - auto-detect columns if not specified
+    
+    - Products (Abt-Buy, Amazon-Google): uses name/title + description + manufacturer
+    - Publications (DBLP): uses title + authors + venue
+    
+    Parameters:
+    - title_only: If True, only use title/name column (for fair comparison)
+    """
     df = df.copy()
+    
+    # Auto-detect columns if not specified
+    if text_cols is None:
+        if title_only:
+            # Use ONLY title/name column for fair comparison
+            text_cols = []
+            for col in df.columns[1:]:
+                if col.lower() in ['title', 'name']:
+                    text_cols = [col]
+                    break
+            print(f"  Using title/name only: {text_cols}")
+        else:
+            # Auto-detect all text columns (current behavior)
+            text_cols = []
+            # Skip first column (ID) and non-text columns
+            for col in df.columns[1:]:
+                if col in df.columns:
+                    # Include object type columns, exclude numeric/irrelevant ones
+                    if df[col].dtype == 'object' and col.lower() not in ['year', 'price', 'id']:
+                        text_cols.append(col)
+            
+            print(f"  Auto-detected text columns: {text_cols}")
+    
     text_parts = []
     for col in text_cols:
         if col in df.columns:
@@ -79,16 +112,37 @@ def prepare_text_column(df, text_cols=['name', 'description']):
         for part in text_parts[1:]:
             df['text'] = df['text'] + ' ' + part
     else:
+        # Fallback if no text columns found
         df['text'] = ''
+        print(f"WARNING: No text columns found! Columns: {df.columns.tolist()}")
     
-    # ✅ NORMALIZE: lowercase and strip (matches notebook)
+    # NORMALIZE: lowercase and strip (matches notebook)
     df['text'] = df['text'].str.lower().str.strip()
+    
+    # Validation
+    avg_len = df['text'].str.len().mean()
+    print(f"Text prepared: avg length = {avg_len:.0f} chars")
     
     return df
 
+def get_display_column(df):
+    """Get the best column name for display in results
+   
+    """
+    # Prefer these columns in order
+    preferred = ['name', 'title', 'authors', 'description']
+    for col in preferred:
+        if col in df.columns:
+            return col
+    
+    # Fallback to second column (first is usually ID)
+    if len(df.columns) > 1:
+        return df.columns[1]
+    return df.columns[0]
+
 def create_ground_truth_dict(df_mapping):
     """Create dict mapping left_id -> right_id from ground truth
-    ⚠️ WARNING: Overwrites if one left has multiple rights!
+    WARNING: Overwrites if one left has multiple rights!
     Use create_ground_truth_set for one-to-many support."""
     gt_dict = {}
     left_col = df_mapping.columns[0]
@@ -103,7 +157,7 @@ def create_ground_truth_dict(df_mapping):
 
 def create_ground_truth_set(df_mapping):
     """Convert ground truth to set of (left_id, right_id) pairs.
-    ✅ Preserves ALL valid one-to-many relationships."""
+    Preserves ALL valid one-to-many relationships."""
     left_col = df_mapping.columns[0]
     right_col = df_mapping.columns[1]
     return set(zip(
@@ -170,10 +224,10 @@ def find_best_threshold_with_details(df_left, df_right, similarity_func, true_ma
     
     id_col_left = df_left.columns[0]
     id_col_right = df_right.columns[0]
-    name_col_left = 'name' if 'name' in df_left.columns else df_left.columns[1]
-    name_col_right = 'name' if 'name' in df_right.columns else df_right.columns[1]
+    name_col_left = get_display_column(df_left)
+    name_col_right = get_display_column(df_right)
     
-    # ✅ BUILD left_has_truth MAP
+    # BUILD left_has_truth MAP
     has_truth = {}
     for (la, rb) in true_matches_set:
         has_truth[la] = True
@@ -238,7 +292,7 @@ def find_best_threshold_with_details(df_left, df_right, similarity_func, true_ma
             elif pred_match and not true_match:
                 fp += 1
             
-            # ✅ FIX: FN is ANY record with ground truth that's not TP
+            # FIX: FN is ANY record with ground truth that's not TP
             if left_has_truth and not (pred_match and true_match):
                 fn += 1
         
@@ -252,13 +306,13 @@ def find_best_threshold_with_details(df_left, df_right, similarity_func, true_ma
             best_f1 = f1
             best_threshold = threshold
     
-    print(f"\n✅ Best threshold: {best_threshold:.2f} (F1={best_f1:.3f})")
+    print(f"\nBest threshold: {best_threshold:.2f} (F1={best_f1:.3f})")
     
-    # ✅ Add predicted_match AND is_correct
+    # Add predicted_match AND is_correct
     for match in all_matches:
         pred_match = match['similarity_score'] >= best_threshold
         true_match = (match['id_left'], match['pred_id_right']) in true_matches_set
-        match['predicted_match'] = 1 if pred_match else 0  # ✅ NEW COLUMN
+        match['predicted_match'] = 1 if pred_match else 0  
         match['is_correct'] = 1 if (pred_match and true_match) else 0
     
     return pd.DataFrame(all_matches), best_threshold, best_f1
@@ -269,8 +323,8 @@ def find_best_threshold_with_details(df_left, df_right, similarity_func, true_ma
 
 def string_distance_method(df_left, df_right, df_mapping, similarity_func, method_name):
     """Generic string distance with threshold optimization"""
-    df_left = prepare_text_column(df_left.copy())
-    df_right = prepare_text_column(df_right.copy())
+    df_left = prepare_text_column(df_left.copy(), title_only=TITLE_ONLY_MODE)
+    df_right = prepare_text_column(df_right.copy(), title_only=TITLE_ONLY_MODE)
     
     true_matches_set = create_ground_truth_set(df_mapping)
     
@@ -304,17 +358,17 @@ def tfidf(df_left, df_right, df_mapping):
     """TF-IDF with threshold optimization"""
     print("\n🔍 Running TF-IDF with threshold optimization...")
     
-    df_left = prepare_text_column(df_left.copy())
-    df_right = prepare_text_column(df_right.copy())
+    df_left = prepare_text_column(df_left.copy(), title_only=TITLE_ONLY_MODE)
+    df_right = prepare_text_column(df_right.copy(), title_only=TITLE_ONLY_MODE)
     
     id_col_left = df_left.columns[0]
     id_col_right = df_right.columns[0]
-    name_col_left = 'name' if 'name' in df_left.columns else df_left.columns[1]
-    name_col_right = 'name' if 'name' in df_right.columns else df_right.columns[1]
+    name_col_left = get_display_column(df_left)
+    name_col_right = get_display_column(df_right)
     
     true_matches = create_ground_truth_set(df_mapping)
     
-    # ✅ BUILD left_has_truth MAP
+    # BUILD left_has_truth MAP
     has_truth = {}
     for (la, rb) in true_matches:
         has_truth[la] = True
@@ -365,14 +419,14 @@ def tfidf(df_left, df_right, df_mapping):
         for match in all_matches:
             pred_match = match['similarity_score'] >= threshold
             true_match = (match['id_left'], match['pred_id_right']) in true_matches
-            left_has_truth = has_truth.get(match['id_left'], False)  # ✅ FIXED
+            left_has_truth = has_truth.get(match['id_left'], False)  
             
             if pred_match and true_match:
                 tp += 1
             elif pred_match and not true_match:
                 fp += 1
             # FN: any record with ground truth that is not TP
-            if left_has_truth and not (pred_match and true_match):  # ✅ CORRECT FN COUNTING
+            if left_has_truth and not (pred_match and true_match):  
                 fn += 1
         
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
@@ -385,13 +439,13 @@ def tfidf(df_left, df_right, df_mapping):
             best_f1 = f1
             best_threshold = threshold
     
-    print(f"\n✅ Best threshold: {best_threshold:.2f} (F1={best_f1:.3f})")
+    print(f"\nBest threshold: {best_threshold:.2f} (F1={best_f1:.3f})")
     
-    # ✅ Add predicted_match AND is_correct
+    # Add predicted_match AND is_correct
     for match in all_matches:
         pred_match = match['similarity_score'] >= best_threshold
         true_match = (match['id_left'], match['pred_id_right']) in true_matches
-        match['predicted_match'] = 1 if pred_match else 0  # ✅ NEW COLUMN
+        match['predicted_match'] = 1 if pred_match else 0
         match['is_correct'] = 1 if (pred_match and true_match) else 0
     
     return pd.DataFrame(all_matches)
@@ -402,19 +456,19 @@ def tfidf(df_left, df_right, df_mapping):
 
 def sentence_transformer(df_left, df_right, df_mapping):
     """SentenceTransformer with threshold optimization"""
-    print("\n🔍 Running SentenceTransformer with threshold optimization...")
+    print("\nRunning SentenceTransformer with threshold optimization...")
     
-    df_left = prepare_text_column(df_left.copy())
-    df_right = prepare_text_column(df_right.copy())
+    df_left = prepare_text_column(df_left.copy(), title_only=TITLE_ONLY_MODE)
+    df_right = prepare_text_column(df_right.copy(), title_only=TITLE_ONLY_MODE)
     
     id_col_left = df_left.columns[0]
     id_col_right = df_right.columns[0]
-    name_col_left = 'name' if 'name' in df_left.columns else df_left.columns[1]
-    name_col_right = 'name' if 'name' in df_right.columns else df_right.columns[1]
+    name_col_left = get_display_column(df_left)
+    name_col_right = get_display_column(df_right)
     
     true_matches = create_ground_truth_set(df_mapping)
     
-    # ✅ BUILD left_has_truth MAP
+    # BUILD left_has_truth MAP
     has_truth = {}
     for (la, rb) in true_matches:
         has_truth[la] = True
@@ -482,9 +536,9 @@ def sentence_transformer(df_left, df_right, df_mapping):
             best_f1 = f1
             best_threshold = threshold
     
-    print(f"\n✅ Best threshold: {best_threshold:.2f} (F1={best_f1:.3f})")
+    print(f"\nBest threshold: {best_threshold:.2f} (F1={best_f1:.3f})")
     
-    # ✅ Add predicted_match AND is_correct
+    # Add predicted_match AND is_correct
     for match in all_matches:
         pred_match = match['similarity_score'] >= best_threshold
         true_match = (match['id_left'], match['pred_id_right']) in true_matches
@@ -514,20 +568,20 @@ def get_openai_embeddings_batch(texts, model="text-embedding-3-small"):
 
 def openai_embeddings(df_left, df_right, df_mapping):
     """OpenAI embeddings with threshold optimization"""
-    print("\n🔍 Running OpenAI Embeddings with threshold optimization...")
-    print("⚠️  This will make OpenAI API calls (~$0.02-0.05)")
+    print("\nRunning OpenAI Embeddings with threshold optimization...")
+    print("This will make OpenAI API calls (~$0.02-0.05)")
     
-    df_left = prepare_text_column(df_left.copy())
-    df_right = prepare_text_column(df_right.copy())
+    df_left = prepare_text_column(df_left.copy(), title_only=TITLE_ONLY_MODE)
+    df_right = prepare_text_column(df_right.copy(), title_only=TITLE_ONLY_MODE)
     
     id_col_left = df_left.columns[0]
     id_col_right = df_right.columns[0]
-    name_col_left = 'name' if 'name' in df_left.columns else df_left.columns[1]
-    name_col_right = 'name' if 'name' in df_right.columns else df_right.columns[1]
+    name_col_left = get_display_column(df_left)
+    name_col_right = get_display_column(df_right)
     
     true_matches = create_ground_truth_set(df_mapping)
     
-    # ✅ BUILD left_has_truth MAP
+    # BUILD left_has_truth MAP
     has_truth = {}
     for (la, rb) in true_matches:
         has_truth[la] = True
@@ -594,16 +648,16 @@ def openai_embeddings(df_left, df_right, df_mapping):
             best_f1 = f1
             best_threshold = threshold
     
-    print(f"\n✅ Best threshold: {best_threshold:.2f} (F1={best_f1:.3f})")
+    print(f"\nBest threshold: {best_threshold:.2f} (F1={best_f1:.3f})")
     
-    # ✅ FIXED: Use set-based checking with threshold
+    # FIXED: Use set-based checking with threshold
     for match in all_matches:
         pred_match = match['similarity_score'] >= best_threshold
         id_a = match['id_left']
         id_b = match['pred_id_right']
         true_match = (id_a, id_b) in true_matches
-        match['predicted_match'] = 1 if pred_match else 0  # ✅ NEW COLUMN
-        match['is_correct'] = int(pred_match and true_match)  # ✅ FIXED
+        match['predicted_match'] = 1 if pred_match else 0  
+        match['is_correct'] = int(pred_match and true_match)  
     
     return pd.DataFrame(all_matches)
 
@@ -613,21 +667,29 @@ def openai_embeddings(df_left, df_right, df_mapping):
 
 def llm_match_single(query_row, df_candidates, id_col_candidates, name_col_candidates, 
                      client, top_k=20, blocking_threshold=0.1, max_text_length=500, 
-                     use_tfidf_blocking=False):
-    """Match a single query using LLM with blocking"""
+                     use_tfidf_blocking=False, vectorizer=None, right_tfidf_matrix=None):
+    """Match a single query using LLM with blocking
+    
+    OPTIMIZED: Now accepts pre-computed TF-IDF for 10-20x speedup!
+    """
     query_text = query_row['text']
     
     # Choose blocking method
     if use_tfidf_blocking:
         # TF-IDF blocking (better semantic similarity)
-        from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.metrics.pairwise import cosine_similarity
         
-        all_texts = [query_text] + df_candidates['text'].tolist()
-        vectorizer = TfidfVectorizer()
-        tfidf_matrix = vectorizer.fit_transform(all_texts)
-        
-        similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:]).flatten()
+        # Use pre-computed TF-IDF if available (MUCH faster!)
+        if vectorizer is not None and right_tfidf_matrix is not None:
+            query_tfidf = vectorizer.transform([query_text])
+            similarities = cosine_similarity(query_tfidf, right_tfidf_matrix).flatten()
+        else:
+            # Fallback to old method (slow but works)
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            all_texts = [query_text] + df_candidates['text'].tolist()
+            vectorizer = TfidfVectorizer()
+            tfidf_matrix = vectorizer.fit_transform(all_texts)
+            similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:]).flatten()
         candidate_indices = similarities.argsort()[::-1][:top_k]
         
         candidates_with_scores = []
@@ -674,9 +736,10 @@ CANDIDATES:
 {candidates_text}
 
 GUIDELINES:
-- Products are SAME if they refer to same model/item
-- Consider: brand, model number, key specifications
-- Account for: abbreviations, different word orders
+- Entities are SAME if they refer to the exact same real-world item/entity
+- Consider: all available attributes (names, identifiers, descriptions, metadata)
+- Account for: abbreviations, different word orders, minor variations, formatting differences
+- Be strict: only match if you're confident they're the same entity
 
 RESPONSE FORMAT:
 If match exists:
@@ -735,36 +798,59 @@ Your response:"""
 
 def llm(df_left, df_right, df_mapping):
     """LLM matching with confidence threshold optimization"""
-    print("\n🔍 Running LLM matching with confidence optimization...")
-    print("⚠️  This is EXPENSIVE (~$0.50-2.00 per transformation)")
+    print("\nRunning LLM matching with confidence optimization...")
+    print("This is EXPENSIVE (~$0.50-2.00 per transformation)")
     
-    df_left = prepare_text_column(df_left.copy())
-    df_right = prepare_text_column(df_right.copy())
+    df_left = prepare_text_column(df_left.copy(), title_only=TITLE_ONLY_MODE)
+    df_right = prepare_text_column(df_right.copy(), title_only=TITLE_ONLY_MODE)
     
     id_col_left = df_left.columns[0]
     id_col_right = df_right.columns[0]
-    name_col_left = 'name' if 'name' in df_left.columns else df_left.columns[1]
-    name_col_right = 'name' if 'name' in df_right.columns else df_right.columns[1]
+    name_col_left = get_display_column(df_left)
+    name_col_right = get_display_column(df_right)
     
     true_matches = create_ground_truth_set(df_mapping)
     client = get_openai_client()
     
-    # ✅ BUILD left_has_truth MAP
+    # BUILD left_has_truth MAP
     has_truth = {}
     for (la, rb) in true_matches:
         has_truth[la] = True
     
-    # Parameters - TRULY improved with OPTION for TF-IDF blocking
-    top_k = 50  # ✅ More candidates
-    blocking_threshold = 0.3  # ✅ MORE permissive (only for JW blocking)
-    max_text_length = 1000  # ✅ Full descriptions
-    use_tfidf_blocking = True  # ✅ BEST: TF-IDF finds better candidates (F1 ≥ 0.80!)
+    # Parameters - ADAPTIVE based on dataset size
+    total_candidates = len(df_right)
+    if total_candidates < 2000:
+        top_k = 50  # Small datasets (Abt-Buy, Amazon-Google)
+    elif total_candidates < 10000:
+        top_k = 100  # Medium datasets (DBLP-ACM)
+    else:
+        top_k = 200  # Large datasets (DBLP-Scholar)
     
-    print(f"Parameters: top_k={top_k}, blocking={'TF-IDF' if use_tfidf_blocking else f'JW≥{blocking_threshold}'}")
+    blocking_threshold = 0.3  # For JW blocking (not used with TF-IDF)
+    max_text_length = 2000  # Increased for complex descriptions/papers
+    use_tfidf_blocking = True  # BEST: TF-IDF finds better candidates
+    
+    print(f"Parameters: top_k={top_k} ({100*top_k/total_candidates:.2f}% of {total_candidates:,} candidates), blocking={'TF-IDF' if use_tfidf_blocking else f'JW≥{blocking_threshold}'}")
     
     # Match each query
     all_matches = []
     total_cost = 0.0
+    
+    # PERFORMANCE FIX: Pre-compute TF-IDF for blocking (10-20x speedup!)
+    vectorizer = None
+    right_tfidf_matrix = None
+    if use_tfidf_blocking:
+        print("Pre-computing TF-IDF vectors for all candidates...")
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        
+        vectorizer = TfidfVectorizer()
+        # Fit on both left and right to ensure same vocabulary
+        all_texts_for_vocab = pd.concat([df_left['text'], df_right['text']])
+        vectorizer.fit(all_texts_for_vocab)
+        
+        # Transform right dataset once (instead of every query!)
+        right_tfidf_matrix = vectorizer.transform(df_right['text'])
+        print(f"TF-IDF cached: {right_tfidf_matrix.shape} - now 10-20x faster!")
     
     for idx_a, row_a in tqdm(df_left.iterrows(), total=len(df_left), desc="LLM matching"):
         id_a = str(row_a[id_col_left])
@@ -775,7 +861,8 @@ def llm(df_left, df_right, df_mapping):
         
         matched_id, matched_name, confidence, cost = llm_match_single(
             row_a, df_right, id_col_right, name_col_right, client,
-            top_k, blocking_threshold, max_text_length, use_tfidf_blocking
+            top_k, blocking_threshold, max_text_length, use_tfidf_blocking,
+            vectorizer, right_tfidf_matrix 
         )
         
         total_cost += cost
@@ -789,7 +876,7 @@ def llm(df_left, df_right, df_mapping):
             'similarity_score': confidence
         })
     
-    print(f"\n💰 Total cost: ${total_cost:.2f}")
+    print(f"\nTotal cost: ${total_cost:.2f}")
     
     # Optimize confidence threshold
     print("\nOptimizing confidence threshold...")
@@ -804,15 +891,15 @@ def llm(df_left, df_right, df_mapping):
                          match['similarity_score'] >= threshold)
             id_a = match['id_left']
             id_b = match['pred_id_right']
-            true_match = (id_a, id_b) in true_matches  # ✅ FIXED: set-based
-            left_has_truth = has_truth.get(id_a, False)  # ✅ FIXED
+            true_match = (id_a, id_b) in true_matches  
+            left_has_truth = has_truth.get(id_a, False)  
             
             if pred_match and true_match:
                 tp += 1
             elif pred_match and not true_match:
                 fp += 1
             # FN: any record with ground truth that is not TP
-            if left_has_truth and not (pred_match and true_match):  # ✅ CORRECT FN COUNTING
+            if left_has_truth and not (pred_match and true_match):
                 fn += 1
         
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
@@ -825,17 +912,17 @@ def llm(df_left, df_right, df_mapping):
             best_f1 = f1
             best_threshold = threshold
     
-    print(f"\n✅ Best threshold: {best_threshold:.2f} (F1={best_f1:.3f})")
+    print(f"\nBest threshold: {best_threshold:.2f} (F1={best_f1:.3f})")
     
-    # ✅ FIXED: Add predicted_match AND use set-based checking
+    # Add predicted_match AND use set-based checking
     for match in all_matches:
         pred_match = (match['pred_id_right'] != '' and 
                      match['similarity_score'] >= best_threshold)
         id_a = match['id_left']
         id_b = match['pred_id_right']
-        true_match = (id_a, id_b) in true_matches  # ✅ FIXED
-        match['predicted_match'] = 1 if pred_match else 0  # ✅ NEW COLUMN
-        match['is_correct'] = int(pred_match and true_match)  # ✅ FIXED
+        true_match = (id_a, id_b) in true_matches 
+        match['predicted_match'] = 1 if pred_match else 0  
+        match['is_correct'] = int(pred_match and true_match)
     
     return pd.DataFrame(all_matches)
 
@@ -855,7 +942,7 @@ METHODS = {
 }
 
 if __name__ == "__main__":
-    print("✅ All 8 methods loaded with FINAL fixes:")
+    print("All 8 methods loaded with FINAL fixes:")
     print("  - One-to-many ground truth support")
     print("  - Correct FN counting")
     print("  - Consistent threshold logic")

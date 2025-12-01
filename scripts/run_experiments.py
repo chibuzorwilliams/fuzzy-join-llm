@@ -28,12 +28,12 @@ DATASETS = {
     'amazon-google': {
         'dir': 'data/amazon-google',
         'left_name': 'amazon',
-        'right_name': 'googleproducts',
+        'right_name': 'google',
         'mapping_file': 'data_original/Amazon_GoogleProducts_perfectMapping.csv'
     },
     'dblp-acm': {
         'dir': 'data/dblp-acm',
-        'left_name': 'dblp2',
+        'left_name': 'dblp',
         'right_name': 'acm',
         'mapping_file': 'data_original/DBLP-ACM_perfectMapping.csv'
     },
@@ -71,6 +71,25 @@ def load_dataset(dataset_name, transformation):
     # Load ground truth
     mapping_file = base_dir / config['mapping_file']
     df_mapping = pd.read_csv(mapping_file)
+
+    # FILTER TO ONLY MATCHED RECORDS (Professor's requirement)
+    print(f"  Original: {len(df_left)} left, {len(df_right)} right")
+    
+    # Get column names
+    left_col = df_left.columns[0]
+    right_col = df_right.columns[0]
+    mapping_left_col = df_mapping.columns[0]
+    mapping_right_col = df_mapping.columns[1]
+    
+    # Get unique IDs from mapping
+    matched_left_ids = set(df_mapping[mapping_left_col].astype(str).unique())
+    matched_right_ids = set(df_mapping[mapping_right_col].astype(str).unique())
+    
+    # Filter datasets to only matched records
+    df_left = df_left[df_left[left_col].astype(str).isin(matched_left_ids)].copy()
+    df_right = df_right[df_right[right_col].astype(str).isin(matched_right_ids)].copy()
+    
+    print(f"  Filtered: {len(df_left)} left, {len(df_right)} right (only matched records)")
     
     return df_left, df_right, df_mapping
 

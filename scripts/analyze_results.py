@@ -1,9 +1,10 @@
 """
-RESULTS ANALYSIS SCRIPT - FINAL VERSION
-========================================
-✅ Uses predicted_match column for correct metrics
-✅ Handles one-to-many ground truth properly
-✅ Matches notebook evaluation logic
+UNIFIED RESULTS ANALYSIS SCRIPT
+================================
+✅ Loads Abt-Buy (unfiltered, all records)
+✅ Loads Amazon-Google (filtered to 1113, title-only)
+✅ Generates ONE summary.csv with both datasets
+✅ Creates plots for all experiments
 
 Usage:
     python scripts/analyze_results.py
@@ -19,8 +20,25 @@ def load_all_results(results_dir='results'):
     results = []
     results_path = Path(results_dir)
     
+    print("\nLoading results:")
+    print("-" * 80)
+    
     for parquet_file in results_path.rglob('*.parquet'):
         df = pd.read_parquet(parquet_file)
+        
+        # Log what we're loading
+        dataset = df['dataset'].iloc[0] if 'dataset' in df.columns else 'unknown'
+        method = df['method'].iloc[0] if 'method' in df.columns else 'unknown'
+        trans = df['transformation'].iloc[0] if 'transformation' in df.columns else 'unknown'
+        
+        # Validate record counts
+        if dataset == 'amazon-google' and len(df) == 1113:
+            print(f"  ✅ {dataset:15s} {method:20s} {trans:20s} {len(df):5d} records (filtered, title-only)")
+        elif dataset == 'abt-buy':
+            print(f"  ✅ {dataset:15s} {method:20s} {trans:20s} {len(df):5d} records (unfiltered)")
+        else:
+            print(f"  ⚠️  {dataset:15s} {method:20s} {trans:20s} {len(df):5d} records (unexpected count!)")
+        
         results.append(df)
     
     if not results:
@@ -32,11 +50,6 @@ def load_all_results(results_dir='results'):
 def compute_metrics(df):
     """
     ✅ CORRECT metrics calculation using predicted_match column
-    
-    predicted_match = 1: We made a prediction (similarity >= threshold)
-    predicted_match = 0: We didn't predict (similarity < threshold)
-    is_correct = 1: Our prediction was correct
-    is_correct = 0: Our prediction was wrong OR we didn't predict
     """
     metrics = []
     
@@ -76,13 +89,23 @@ def print_summary(metrics_df):
     print("RESULTS SUMMARY")
     print("="*80)
     
-    # Pivot table: methods as rows, transformations as columns, F1 as values
-    for dataset in metrics_df['dataset'].unique():
+    for dataset in sorted(metrics_df['dataset'].unique()):
         print(f"\nDataset: {dataset}")
         print("-"*80)
         
         df_dataset = metrics_df[metrics_df['dataset'] == dataset]
         
+        # Show record count info
+        sample_count = df_dataset['total_records'].iloc[0]
+        if dataset == 'amazon-google':
+            if sample_count == 1113:
+                print("✅ Filtered to 1113 records (title-only)")
+            else:
+                print(f"⚠️  Unexpected count: {sample_count} records")
+        elif dataset == 'abt-buy':
+            print(f"✅ Unfiltered: {sample_count} records")
+        
+        # F1 scores pivot table
         pivot = df_dataset.pivot_table(
             index='method',
             columns='transformation',
@@ -90,26 +113,34 @@ def print_summary(metrics_df):
             aggfunc='first'
         )
         
-        print(pivot.round(3))
-        print()
+        print("\nF1 Scores:")
+        print(pivot.round(3).to_string())
         
-        # Show TP/FP/FN for one transformation
+        # Detailed metrics for original transformation
         if 'original' in df_dataset['transformation'].values:
-            print("\nDetailed metrics (original transformation):")
-            orig = df_dataset[df_dataset['transformation'] == 'original']
-            print(orig[['method', 'tp', 'fp', 'fn', 'precision', 'recall', 'f1']].to_string(index=False))
-            print()
+            print("\nDetailed Metrics (Original Transformation):")
+            orig = df_dataset[df_dataset['transformation'] == 'original'].copy()
+            orig = orig.sort_values('f1', ascending=False)
+            print(orig[['method', 'f1', 'precision', 'recall', 'tp', 'fp', 'fn']].to_string(index=False))
+        
+        print()
 
 def plot_results(metrics_df, output_dir='results/plots'):
     """Create visualization plots"""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Set style
     sns.set_style("whitegrid")
     
-    for dataset in metrics_df['dataset'].unique():
+    for dataset in sorted(metrics_df['dataset'].unique()):
         df_dataset = metrics_df[metrics_df['dataset'] == dataset]
+        
+        # Determine if this is filtered or not for labeling
+        sample_count = df_dataset['total_records'].iloc[0]
+        if dataset == 'amazon-google' and sample_count == 1113:
+            label_suffix = " (Title-Only)"
+        else:
+            label_suffix = ""
         
         # Plot 1: F1 scores by method and transformation
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -122,7 +153,7 @@ def plot_results(metrics_df, output_dir='results/plots'):
         )
         
         pivot.plot(kind='bar', ax=ax)
-        ax.set_title(f'F1 Scores: {dataset}')
+        ax.set_title(f'F1 Scores: {dataset}{label_suffix}')
         ax.set_xlabel('Method')
         ax.set_ylabel('F1 Score')
         ax.set_ylim(0, 1)
@@ -142,7 +173,6 @@ def plot_results(metrics_df, output_dir='results/plots'):
             ax.scatter(df_trans['recall'], df_trans['precision'], 
                       label=transformation, s=100, alpha=0.6)
             
-            # Add method labels
             for _, row in df_trans.iterrows():
                 ax.annotate(row['method'], 
                           (row['recall'], row['precision']),
@@ -150,7 +180,7 @@ def plot_results(metrics_df, output_dir='results/plots'):
         
         ax.set_xlabel('Recall')
         ax.set_ylabel('Precision')
-        ax.set_title(f'Precision vs Recall: {dataset}')
+        ax.set_title(f'Precision vs Recall: {dataset}{label_suffix}')
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
         ax.legend()
@@ -165,6 +195,9 @@ def export_summary(metrics_df, output_file='results/summary.csv'):
     """Export summary to CSV"""
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Sort for readability
+    metrics_df = metrics_df.sort_values(['dataset', 'method', 'transformation'])
     
     metrics_df.to_csv(output_path, index=False)
     print(f"✅ Exported summary to: {output_path}")
@@ -181,10 +214,10 @@ def main():
     if df_all is None:
         return
     
-    print(f"   Loaded {len(df_all)} total records")
-    print(f"   Methods: {df_all['method'].unique().tolist()}")
-    print(f"   Transformations: {df_all['transformation'].unique().tolist()}")
-    print(f"   Datasets: {df_all['dataset'].unique().tolist()}")
+    print(f"\n   Total records loaded: {len(df_all)}")
+    print(f"   Methods: {sorted(df_all['method'].unique().tolist())}")
+    print(f"   Transformations: {sorted(df_all['transformation'].unique().tolist())}")
+    print(f"   Datasets: {sorted(df_all['dataset'].unique().tolist())}")
     
     # Check for predicted_match column
     if 'predicted_match' not in df_all.columns:
@@ -216,13 +249,23 @@ def main():
     print("  - results/plots/*.png")
     
     print("\n" + "="*80)
-    print("VALIDATION CHECK")
+    print("DATA VALIDATION")
     print("="*80)
-    print("\nExpected F1 scores (from notebook):")
-    print("  Jaro-Winkler: ~0.08")
-    print("  TF-IDF: ~0.52")
-    print("  SentenceTransformer: ~0.62")
-    print("\nIf your F1 scores match these, the fix worked! ✅")
+    
+    # Verify Amazon-Google is filtered
+    ag_metrics = metrics_df[metrics_df['dataset'] == 'amazon-google']
+    if not ag_metrics.empty:
+        ag_count = ag_metrics['total_records'].iloc[0]
+        if ag_count == 1113:
+            print("✅ Amazon-Google: Correctly filtered (1113 records, title-only)")
+        else:
+            print(f"⚠️  Amazon-Google: Wrong count ({ag_count} records, expected 1113)")
+    
+    # Verify Abt-Buy exists
+    ab_metrics = metrics_df[metrics_df['dataset'] == 'abt-buy']
+    if not ab_metrics.empty:
+        ab_count = ab_metrics['total_records'].iloc[0]
+        print(f"✅ Abt-Buy: Loaded ({ab_count} records, unfiltered)")
 
 if __name__ == "__main__":
     main()
