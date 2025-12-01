@@ -1,3 +1,4 @@
+
 library(tidyverse)
 library(cowplot)
 
@@ -6,19 +7,36 @@ options(dplyr.width = Inf)
 font <- 'Roboto Condensed'
 
 # Load data
-df <- read_csv(file.path('results', 'summary.csv')) %>% 
-  group_by(method) %>% 
-  mutate(max_f1 = max(f1)) %>% 
-  ungroup() %>% 
-  mutate(method = fct_reorder(method, -max_f1))
+df <- read_csv(file.path('results', 'summary.csv')) %>%
+  group_by(method, dataset) %>%
+  mutate(max_f1 = max(f1)) %>%
+  ungroup() %>%
+  mutate(
+    # Convert to proper title case
+    method = str_replace_all(method, "_", " ") %>%
+      str_to_title() %>%
+      str_replace_all("Tfidf", "TFIDF") %>%
+      str_replace_all("Llm", "LLM") %>%
+      str_replace_all("Openai Embeddings", "OpenAI Emb.") %>%
+      str_replace_all("Sentence Transformer", "Transformer"),
+    dataset = str_replace_all(dataset, "-", " ") %>% str_to_title(),
+    transformation = str_replace_all(transformation, "_", " ") %>%
+      str_to_title() %>%
+      str_replace_all("Tfidf", "TFIDF") %>%
+      str_replace_all("Llm", "LLM") %>%
+      str_replace_all("Openai Embeddings", "OpenAI Emb.") %>%
+      str_replace_all("Sentence Transformer", "Transformer"),
+    # Reorder method by max F1
+    method = fct_reorder(method, -max_f1)
+  )
 
 df_original <- df %>%
-  filter(transformation == 'original') %>%
-  select(method, f1_original = f1)
+  filter(transformation == 'Original') %>%
+  select(method, dataset, f1_original = f1)
 
 df %>%
-  filter(transformation != 'original') %>%
-  left_join(df_original, by = 'method') %>%
+  filter(transformation != 'Original') %>%
+  left_join(df_original, by = c('method', 'dataset')) %>%
   ggplot() +
   geom_segment(
     aes(
@@ -32,7 +50,7 @@ df %>%
   ) +
   geom_vline(
     data = df %>%
-      filter(transformation == 'original'),
+      filter(transformation == 'Original'),
     aes(xintercept = f1)
   ) +
   geom_point(
@@ -43,7 +61,12 @@ df %>%
     ),
     size = 1
   ) +
-  facet_wrap(vars(method), ncol = 1) +
+  facet_grid(method ~ dataset) +
+  scale_x_continuous(limits = c(0,1)) +
+  labs(
+    x = 'F1 Score',
+    y = 'Transformation'
+  ) +
   theme_minimal_vgrid(font_family = font, font_size = 16) +
   theme(
     strip.background = element_rect("grey80"),
@@ -62,6 +85,9 @@ ggsave(
 )
 
 df %>% 
+  mutate(
+    transformation = fct_reorder(transformation, -f1)
+  ) %>% 
   ggplot() +
   geom_point(
     aes(
@@ -70,19 +96,28 @@ df %>%
       color = transformation
     )
   ) +
-  facet_wrap(vars(method)) +
+  facet_grid(method ~ dataset) +
+  scale_x_continuous(limits = c(0,1)) +
+  scale_y_continuous(limits = c(0,1)) +
+  labs(
+    x = 'Recall',
+    y = 'Precision', 
+    color = 'Transformation'
+  ) +
   theme_minimal_grid(font_family = font, font_size = 16) +
   theme(
     strip.background = element_rect("grey80"),
     panel.grid.minor = element_blank(),
     plot.title.position = "plot",
+    legend.position = 'bottom',
     panel.background = element_rect(fill = 'white', color = NA),
     plot.background = element_rect(fill = 'white', color = NA)
   ) +
+  guides(color = guide_legend(nrow = 2)) +
   panel_border()
 
 ggsave(
   filename = file.path('results', 'plots', 'precision_recall_scatter.png'),
-  width = 8,
-  height = 6
+  width = 7,
+  height = 13
 )
