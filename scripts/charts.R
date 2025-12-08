@@ -1,4 +1,3 @@
-
 library(tidyverse)
 library(cowplot)
 
@@ -62,7 +61,7 @@ df %>%
     size = 1
   ) +
   facet_grid(method ~ dataset) +
-  scale_x_continuous(limits = c(0,1)) +
+  scale_x_continuous(limits = c(0, 1)) +
   labs(
     x = 'F1 Score',
     y = 'Transformation'
@@ -84,24 +83,24 @@ ggsave(
   height = 10
 )
 
-df %>% 
+df %>%
   mutate(
     transformation = fct_reorder(transformation, -f1)
-  ) %>% 
+  ) %>%
   ggplot() +
   geom_point(
     aes(
-      x = recall, 
+      x = recall,
       y = precision,
       color = transformation
     )
   ) +
   facet_grid(method ~ dataset) +
-  scale_x_continuous(limits = c(0,1)) +
-  scale_y_continuous(limits = c(0,1)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
   labs(
     x = 'Recall',
-    y = 'Precision', 
+    y = 'Precision',
     color = 'Transformation'
   ) +
   theme_minimal_grid(font_family = font, font_size = 16) +
@@ -109,15 +108,15 @@ df %>%
     strip.background = element_rect("grey80"),
     panel.grid.minor = element_blank(),
     plot.title.position = "plot",
-    legend.position = 'bottom',
+    legend.position = 'right',
     panel.background = element_rect(fill = 'white', color = NA),
     plot.background = element_rect(fill = 'white', color = NA)
   ) +
-  guides(color = guide_legend(nrow = 2)) +
+  guides(color = guide_legend(ncol = 1)) +
   panel_border()
 
 ggsave(
   filename = file.path('results', 'plots', 'precision_recall_scatter.png'),
-  width = 7,
+  width = 8,
   height = 13
 )
