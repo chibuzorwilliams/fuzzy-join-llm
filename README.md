@@ -6,28 +6,40 @@
 
 ##  Research Question
 
-**How do different entity matching techniques perform under systematically degraded text conditions**
+**Does an LLM entity matcher rely on the features that actually distinguish entities, or on semantic priors the task does not require?**
 
-We evaluate methods on:
-1. **Original data** - Baseline performance
-2. **Ciphered letters** - Consistent character substitution (e.g., 'a'→'x', 'b'→'y')
-3. **Ciphered words** - Vocabulary replacement (e.g., 'Sony'→'Bear')
-4. **Scrambled letters** - Letters shuffled within words (e.g., 'Sony'→'nSyo')
+We use *controlled semantic ablation*: structure-preserving transformations that remove meaning while keeping the discriminative tokens (and their cross-catalog identity) fully intact. If a method depends only on token distinctiveness, it should be unaffected; if it depends on meaning, it should collapse.
+
+1. **Original** - Baseline
+2. **Ciphered letters** - Consistent character substitution applied to both catalogs (e.g., 'a'→'x'). Preserves token identity exactly.
+3. **Ciphered words** - Consistent vocabulary replacement (e.g., 'Sony'→'Goat' in both catalogs).
+4. **Scrambled** - Deterministic per-word letter scrambling (first/last letter kept), identical across catalogs.
 
 ---
 
 ##  Key Findings
 
-### **Best Method: LLM (GPT-4o-mini) + TF-IDF Blocking** compared to the next best method
+**The LLM's clean-text advantage depends on semantic content the task does not require.** Once token-based methods are properly thresholded, the LLM's edge on clean data is modest (Abt-Buy) or negligible (Amazon-Google), and under ablation the LLM collapses while token methods stay flat.
 
-| Transformation       | LLM F1    | OpenAI Embeddings (F1)| Improvement |
-|----------------------|-----------|-----------------------|-------------|
-| **Original**         | **0.928** | 0.799                 | **+16%**    |
-| **Ciphered Letters** | **0.779** | 0.409                 | **+90%**    |
-| **Scrambled**        | **0.603** | 0.508                 | **+19%**    |  
-| **Ciphered Words**   | **0.511** | 0.422                 | **+21%**    |
+**Abt-Buy F1:**
+| Transformation | LLM | TF-IDF | Soft TF-IDF |
+|---|---|---|---|
+| Original | **0.928** | 0.761 | 0.742 |
+| Ciphered Letters | 0.779 | 0.747 | 0.731 |
+| Ciphered Words | 0.511 | **0.751** | 0.743 |
+| Scrambled | 0.603 | 0.746 | **0.763** |
 
-**Key Insight:** LLMs maintain semantic understanding even under adversarial transformations, outperforming pure embedding methods by 90% on ciphered data.
+**Amazon-Google F1:**
+| Transformation | LLM | TF-IDF |
+|---|---|---|
+| Original | **0.822** | 0.808 |
+| Ciphered Letters | 0.585 | **0.808** |
+| Ciphered Words | 0.576 | **0.807** |
+| Scrambled | 0.556 | **0.808** |
+
+**Key insight:** TF-IDF blocking keeps the true match in the candidate set for ~99% of records *even under corruption*, and a purely lexical scorer still solves those cases — yet the LLM cannot. The matching evidence is present and preserved; the LLM fails because it relies on meaning the task does not require.
+
+> **Note on results:** earlier versions of this repo reported lower TF-IDF/Soft TF-IDF F1 because (a) the threshold sweep started at 0.50, which is above the optimal operating point for cosine/edit-distance methods, and (b) the "Soft TF-IDF" method lacked IDF weighting. Both are fixed (`scripts/methods.py`); the threshold sweep now runs the full 0.05–0.95 grid and Soft TF-IDF is the real IDF-weighted, Jaro-Winkler version. The previous `summary.csv` is preserved as `summary_OLD_threshold0.50_brokenSoftTFIDF.csv`.
 
 ---
 

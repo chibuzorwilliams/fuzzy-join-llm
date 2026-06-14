@@ -21,7 +21,8 @@ def prepare_text(df):
     """Prepare text column by concatenating and normalizing"""
     text_cols = []
     for col in df.columns[1:]:  # Skip ID column
-        if df[col].dtype == 'object':
+        # newer pandas reports text columns as 'str' rather than 'object'
+        if pd.api.types.is_string_dtype(df[col]):
             text_cols.append(col)
     
     df['text'] = df[text_cols].fillna('').agg(' '.join, axis=1)

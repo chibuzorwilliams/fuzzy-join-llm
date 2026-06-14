@@ -96,8 +96,9 @@ def prepare_text_column(df, text_cols=None, title_only=False):
             # Skip first column (ID) and non-text columns
             for col in df.columns[1:]:
                 if col in df.columns:
-                    # Include object type columns, exclude numeric/irrelevant ones
-                    if df[col].dtype == 'object' and col.lower() not in ['year', 'price', 'id']:
+                    # Include string/object columns, exclude numeric/irrelevant ones
+                    # (newer pandas reports text columns as 'str' rather than 'object')
+                    if pd.api.types.is_string_dtype(df[col]) and col.lower() not in ['year', 'price', 'id']:
                         text_cols.append(col)
             
             print(f"  Auto-detected text columns: {text_cols}")
@@ -194,18 +195,25 @@ def monge_elkan_similarity(str1, str2):
     return sum_best / len(tokens_a)
 
 def soft_tfidf_similarity(str1, str2, theta=0.9):
+    """DEPRECATED: fuzzy token overlap WITHOUT TF/IDF weighting.
+
+    This is NOT Soft TF-IDF (Cohen et al. 2003): it has no term weighting,
+    so it is really a thresholded Monge-Elkan. Kept only for reference.
+    The experiments use soft_tfidf() below, which implements the real
+    IDF-weighted Soft TF-IDF. Do not use this for the paper.
+    """
     tokens_a = str1.split()
     tokens_b = str2.split()
-    
+
     if len(tokens_a) == 0 or len(tokens_b) == 0:
         return 0.0
-    
+
     score = 0.0
     for token_a in tokens_a:
         best_match = max([jaro_winkler_similarity(token_a, token_b) for token_b in tokens_b])
         if best_match >= theta:
             score += best_match
-    
+
     return score / len(tokens_a) if len(tokens_a) > 0 else 0.0
 
 # =============================================================================
@@ -272,7 +280,7 @@ def find_best_threshold_with_details(df_left, df_right, similarity_func, true_ma
         })
     
     # Optimize threshold
-    thresholds = np.arange(0.50, 0.96, 0.05)
+    thresholds = np.arange(0.05, 0.96, 0.05)  # full grid; cosine/edit matches score well below 0.5
     best_threshold = 0.5
     best_f1 = 0.0
     
@@ -346,9 +354,107 @@ def monge_elkan(df_left, df_right, df_mapping):
     return string_distance_method(df_left, df_right, df_mapping,
                                   monge_elkan_similarity, "Monge-Elkan")
 
+def _fuzzy_token_matrix(vocab, theta=0.9):
+    """Sparse VxV Jaro-Winkler similarity matrix for token pairs with JW >= theta
+    (diagonal excluded). Prefix-bucketed for speed (JW>=0.9 implies a shared prefix)."""
+    from collections import defaultdict
+    from scipy.sparse import csr_matrix
+    buckets = defaultdict(list)
+    for i, w in enumerate(vocab):
+        buckets[w[0] if w else ""].append(i)
+    rows, cols, vals = [], [], []
+    for idxs in buckets.values():
+        for a in range(len(idxs)):
+            i = idxs[a]; wi = vocab[i]
+            for b in range(a + 1, len(idxs)):
+                j = idxs[b]; wj = vocab[j]
+                if abs(len(wi) - len(wj)) > 3:
+                    continue
+                s = jaro_winkler_similarity(wi, wj)
+                if s >= theta:
+                    rows += [i, j]; cols += [j, i]; vals += [s, s]
+    return csr_matrix((vals, (rows, cols)), shape=(len(vocab), len(vocab)))
+
 def soft_tfidf(df_left, df_right, df_mapping):
-    return string_distance_method(df_left, df_right, df_mapping,
-                                  soft_tfidf_similarity, "Soft-TF-IDF")
+    """Real Soft TF-IDF (Cohen et al. 2003): L2-normalized TF-IDF token weights with
+    Jaro-Winkler fuzzy token matching (theta=0.9). Computed as the bilinear form
+    score = L (I + M) R^T, where M holds fuzzy inter-token similarities. With theta=0.9
+    a token has at most ~1 fuzzy partner, so this matches Cohen's max-based definition."""
+    print("\n🔍 Running Soft TF-IDF (IDF-weighted, Jaro-Winkler fuzzy match)...")
+    import numpy as np
+    from scipy.sparse import identity
+
+    df_left = prepare_text_column(df_left.copy(), title_only=TITLE_ONLY_MODE)
+    df_right = prepare_text_column(df_right.copy(), title_only=TITLE_ONLY_MODE)
+
+    id_col_left = df_left.columns[0]
+    id_col_right = df_right.columns[0]
+    name_col_left = get_display_column(df_left)
+    name_col_right = get_display_column(df_right)
+
+    true_matches = create_ground_truth_set(df_mapping)
+    has_truth = {}
+    for (la, rb) in true_matches:
+        has_truth[la] = True
+
+    vectorizer = TfidfVectorizer(norm="l2")
+    vectorizer.fit(pd.concat([df_left['text'], df_right['text']]))
+    vocab = vectorizer.get_feature_names_out()
+    left_m = vectorizer.transform(df_left['text'])
+    right_m = vectorizer.transform(df_right['text'])
+
+    print(f"Building fuzzy token matrix over {len(vocab):,} terms...")
+    M = _fuzzy_token_matrix(vocab)
+    I = identity(len(vocab), format="csr")
+    print("Computing Soft TF-IDF score matrix...")
+    similarity_matrix = np.asarray((left_m @ (I + M) @ right_m.T).todense())
+
+    all_matches = []
+    for idx_a in tqdm(range(len(df_left)), desc="Soft TF-IDF matching"):
+        id_a = str(df_left.iloc[idx_a][id_col_left])
+        name_a = df_left.iloc[idx_a][name_col_left]
+        true_matches_for_a = [r for (l, r) in true_matches if l == id_a]
+        true_id_b = true_matches_for_a[0] if true_matches_for_a else None
+        best_idx_b = int(np.argmax(similarity_matrix[idx_a]))
+        best_sim = float(similarity_matrix[idx_a, best_idx_b])
+        all_matches.append({
+            'id_left': id_a,
+            'left_name': name_a,
+            'true_id_right': true_id_b if true_id_b else '',
+            'pred_id_right': str(df_right.iloc[best_idx_b][id_col_right]),
+            'pred_right_name': df_right.iloc[best_idx_b][name_col_right],
+            'similarity_score': best_sim
+        })
+
+    print("\nOptimizing threshold...")
+    thresholds = np.arange(0.05, 0.96, 0.05)  # full grid; cosine/edit matches score well below 0.5
+    best_threshold, best_f1 = 0.5, 0.0
+    for threshold in thresholds:
+        tp = fp = fn = 0
+        for match in all_matches:
+            pred_match = match['similarity_score'] >= threshold
+            true_match = (match['id_left'], match['pred_id_right']) in true_matches
+            left_has_truth = has_truth.get(match['id_left'], False)
+            if pred_match and true_match:
+                tp += 1
+            elif pred_match and not true_match:
+                fp += 1
+            if left_has_truth and not (pred_match and true_match):
+                fn += 1
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        if f1 > best_f1:
+            best_f1, best_threshold = f1, threshold
+    print(f"\nBest threshold: {best_threshold:.2f} (F1={best_f1:.3f})")
+
+    for match in all_matches:
+        pred_match = match['similarity_score'] >= best_threshold
+        true_match = (match['id_left'], match['pred_id_right']) in true_matches
+        match['predicted_match'] = 1 if pred_match else 0
+        match['is_correct'] = int(pred_match and true_match)
+
+    return pd.DataFrame(all_matches)
 
 # =============================================================================
 # TF-IDF
@@ -410,7 +516,7 @@ def tfidf(df_left, df_right, df_mapping):
     
     # Optimize threshold
     print("\nOptimizing threshold...")
-    thresholds = np.arange(0.50, 0.96, 0.05)
+    thresholds = np.arange(0.05, 0.96, 0.05)  # full grid; cosine/edit matches score well below 0.5
     best_threshold = 0.5
     best_f1 = 0.0
     
@@ -507,7 +613,7 @@ def sentence_transformer(df_left, df_right, df_mapping):
     
     # Optimize threshold (same as TF-IDF)
     print("\nOptimizing threshold...")
-    thresholds = np.arange(0.50, 0.96, 0.05)
+    thresholds = np.arange(0.05, 0.96, 0.05)  # full grid; cosine/edit matches score well below 0.5
     best_threshold = 0.5
     best_f1 = 0.0
     
@@ -619,7 +725,7 @@ def openai_embeddings(df_left, df_right, df_mapping):
     
     # Optimize threshold
     print("\nOptimizing threshold...")
-    thresholds = np.arange(0.50, 0.96, 0.05)
+    thresholds = np.arange(0.05, 0.96, 0.05)  # full grid; cosine/edit matches score well below 0.5
     best_threshold = 0.5
     best_f1 = 0.0
     
@@ -880,7 +986,7 @@ def llm(df_left, df_right, df_mapping):
     
     # Optimize confidence threshold
     print("\nOptimizing confidence threshold...")
-    thresholds = np.arange(0.50, 0.96, 0.05)
+    thresholds = np.arange(0.05, 0.96, 0.05)  # full grid; cosine/edit matches score well below 0.5
     best_threshold = 0.5
     best_f1 = 0.0
     
