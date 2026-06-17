@@ -1,0 +1,9 @@
+transformation,method,label,n,correct,accuracy
+original,llm_haiku,Claude Haiku — Standard,20,0,0.0
+original,llm_haiku_token_fallback,Claude Haiku — Token Fallback,20,0,0.0
+ciphered_letters,llm_haiku,Claude Haiku — Standard,20,0,0.0
+ciphered_letters,llm_haiku_token_fallback,Claude Haiku — Token Fallback,20,0,0.0
+ciphered_words,llm_haiku,Claude Haiku — Standard,20,0,0.0
+ciphered_words,llm_haiku_token_fallback,Claude Haiku — Token Fallback,20,0,0.0
+scrambled,llm_haiku,Claude Haiku — Standard,20,0,0.0
+scrambled,llm_haiku_token_fallback,Claude Haiku — Token Fallback,20,0,0.0
