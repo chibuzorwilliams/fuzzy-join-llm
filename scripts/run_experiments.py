@@ -109,8 +109,16 @@ def run_single_experiment(dataset_name, transformation, method_name, method_func
         print(f"  Ground truth: {len(df_mapping)} matches")
         
         # Run method (includes threshold optimization)
+        output_dir = Path(f"results/{dataset_name}/{method_name}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / f"{transformation}.parquet"
+
         print(f"\nRunning {method_name}...")
-        results_df = method_func(df_left, df_right, df_mapping)
+        import inspect
+        if 'output_path' in inspect.signature(method_func).parameters:
+            results_df = method_func(df_left, df_right, df_mapping, output_path=str(output_file))
+        else:
+            results_df = method_func(df_left, df_right, df_mapping)
         
         # Add metadata
         results_df['method'] = method_name
@@ -118,13 +126,9 @@ def run_single_experiment(dataset_name, transformation, method_name, method_func
         results_df['dataset'] = dataset_name
         results_df['timestamp'] = datetime.now().isoformat()
         
-        # Save to parquet
-        output_dir = Path(f"results/{dataset_name}/{method_name}")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_file = output_dir / f"{transformation}.parquet"
-        
+        # Save final results to parquet
         results_df.to_parquet(output_file, index=False)
-        print(f"\n✅ Saved: {output_file}")
+        print(f"\nSaved: {output_file}")
         
         # Print summary
         correct = results_df['is_correct'].sum()

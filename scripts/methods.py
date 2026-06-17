@@ -41,9 +41,16 @@ from openai import OpenAI
 import os
 from dotenv import load_dotenv
 
+# Anthropic
+try:
+    from anthropic import Anthropic
+except ImportError:
+    Anthropic = None
+
 # Lazy loading
 _sentence_model = None
 _openai_client = None
+_anthropic_client = None
 
 # TITLE-ONLY MODE (set via environment variable)
 TITLE_ONLY_MODE = os.environ.get('TITLE_ONLY', 'false').lower() == 'true'
@@ -64,6 +71,18 @@ def get_openai_client():
             raise ValueError("OPENAI_API_KEY not found")
         _openai_client = OpenAI(api_key=api_key)
     return _openai_client
+
+def get_anthropic_client():
+    global _anthropic_client
+    if _anthropic_client is None:
+        if Anthropic is None:
+            raise ImportError("anthropic package not installed. Run: pip install anthropic")
+        load_dotenv()
+        api_key = os.getenv('ANTHROPIC_API_KEY')
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY not found in .env")
+        _anthropic_client = Anthropic(api_key=api_key, timeout=60.0)
+    return _anthropic_client
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -771,8 +790,184 @@ def openai_embeddings(df_left, df_right, df_mapping):
 # LLM MATCHING
 # =============================================================================
 
-def llm_match_single(query_row, df_candidates, id_col_candidates, name_col_candidates, 
-                     client, top_k=20, blocking_threshold=0.1, max_text_length=500, 
+# =============================================================================
+# LLM PROMPTS
+# =============================================================================
+
+PROMPT_STANDARD = """You are an expert at entity matching. Determine if any candidate matches the query.
+
+QUERY:
+{query_text}
+
+CANDIDATES:
+{candidates_text}
+
+GUIDELINES:
+- Entities are SAME if they refer to the exact same real-world item/entity
+- Consider: all available attributes (names, identifiers, descriptions, metadata)
+- Account for: abbreviations, different word orders, minor variations, formatting differences
+- Be strict: only match if you're confident they're the same entity
+
+RESPONSE FORMAT:
+If match exists:
+Match: [number]
+Confidence: [0.0 to 1.0]
+Reasoning: [brief]
+
+If no match:
+Match: 0
+Confidence: [0.0 to 1.0]
+Reasoning: [why not]
+
+Your response:"""
+
+PROMPT_TOKEN_FALLBACK = """You are an expert at entity matching. The text below has been transformed so that words are no longer readable English, but the transformation is consistent: the same original word always maps to the same transformed token in both the query and candidates. Your task is to find which candidate refers to the same entity as the query by comparing shared tokens, character patterns, numbers, and structural similarity — NOT by trying to read the words as meaningful language.
+
+QUERY:
+{query_text}
+
+CANDIDATES:
+{candidates_text}
+
+GUIDELINES:
+- Focus on overlapping tokens, shared substrings, matching numbers, and structural patterns
+- The same original word always becomes the same transformed token across query and candidates
+- Distinctive tokens (model numbers, codes, identifiers) are the strongest signal
+- Do NOT try to interpret the words semantically — they are deliberately scrambled
+- Be strict: only match if token overlap and structure clearly indicate the same entity
+
+RESPONSE FORMAT:
+If match exists:
+Match: [number]
+Confidence: [0.0 to 1.0]
+Reasoning: [brief]
+
+If no match:
+Match: 0
+Confidence: [0.0 to 1.0]
+Reasoning: [why not]
+
+Your response:"""
+
+# =============================================================================
+# LLM API CALL HELPERS
+# =============================================================================
+
+def _retry_with_backoff(fn, max_retries=5, base_delay=2.0):
+    """Retry a function with exponential backoff on rate limit / transient errors."""
+    import time as _time
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except Exception as e:
+            err_str = str(e)
+            is_retryable = any(k in err_str for k in ['429', 'rate_limit', 'overloaded', '529', '503', 'timeout', 'Timeout', 'timed out', 'Connection', 'connection', 'index out of range', 'RemoteDisconnected', 'BrokenPipe', 'ConnectionReset'])
+            if not is_retryable or attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            print(f"    Rate limited, retrying in {delay:.0f}s (attempt {attempt+1}/{max_retries})...")
+            _time.sleep(delay)
+
+def _call_openai_gpt4o(prompt, model="gpt-4o"):
+    """Call OpenAI API with GPT-4o and return (answer_text, cost)."""
+    def _do():
+        client = get_openai_client()
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        answer = response.choices[0].message.content.strip()
+        input_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+        # GPT-4o pricing: $2.50/MTok input, $10/MTok output
+        cost = (input_tokens / 1_000_000) * 2.50 + (output_tokens / 1_000_000) * 10.0
+        return answer, cost
+    return _retry_with_backoff(_do)
+
+def _call_openai(prompt, model="gpt-4o-mini"):
+    """Call OpenAI API and return (answer_text, cost)."""
+    def _do():
+        client = get_openai_client()
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        answer = response.choices[0].message.content.strip()
+        tokens = response.usage.total_tokens
+        # GPT-4o-mini pricing: $0.15/MTok input, $0.60/MTok output
+        cost = (tokens / 1_000_000) * 0.15
+        return answer, cost
+    return _retry_with_backoff(_do)
+
+def _call_anthropic(prompt, model="claude-sonnet-4-6"):
+    """Call Anthropic API and return (answer_text, cost)."""
+    def _do():
+        client = get_anthropic_client()
+        response = client.messages.create(
+            model=model,
+            max_tokens=256,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        answer = response.content[0].text.strip()
+        input_tokens = response.usage.input_tokens
+        output_tokens = response.usage.output_tokens
+        # Claude Sonnet 4.6 pricing: $3/MTok input, $15/MTok output
+        cost = (input_tokens / 1_000_000) * 3.0 + (output_tokens / 1_000_000) * 15.0
+        return answer, cost
+    return _retry_with_backoff(_do)
+
+def _call_anthropic_haiku(prompt, model="claude-haiku-4-5-20251001"):
+    """Call Anthropic Haiku API and return (answer_text, cost)."""
+    def _do():
+        client = get_anthropic_client()
+        response = client.messages.create(
+            model=model,
+            max_tokens=256,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        answer = response.content[0].text.strip()
+        input_tokens = response.usage.input_tokens
+        output_tokens = response.usage.output_tokens
+        # Claude Haiku 4.5 pricing: $0.80/MTok input, $4.00/MTok output
+        cost = (input_tokens / 1_000_000) * 0.80 + (output_tokens / 1_000_000) * 4.0
+        return answer, cost
+    return _retry_with_backoff(_do)
+
+def _parse_llm_response(answer, top_candidates):
+    """Parse Match/Confidence from LLM response text. Returns (matched_id, matched_name, confidence)."""
+    match_num = 0
+    confidence = 0.0
+
+    lines = answer.split('\n')
+    for line in lines:
+        line = line.strip()
+        if line.startswith('Match:'):
+            try:
+                match_num = int(''.join(c for c in line.split('Match:')[1] if c.isdigit()))
+            except:
+                pass
+        elif line.startswith('Confidence:'):
+            try:
+                conf_str = line.split('Confidence:')[1].strip()
+                confidence = float(''.join(c for c in conf_str if c.isdigit() or c == '.'))
+                if confidence > 1.0:
+                    confidence = confidence / 100.0
+            except:
+                pass
+
+    if match_num > 0 and match_num <= len(top_candidates):
+        matched_id = top_candidates[match_num - 1][2]
+        matched_name = top_candidates[match_num - 1][3]
+        return matched_id, matched_name, confidence
+
+    return None, None, confidence
+
+def llm_match_single(query_row, df_candidates, id_col_candidates, name_col_candidates,
+                     client, top_k=20, blocking_threshold=0.1, max_text_length=500,
                      use_tfidf_blocking=False, vectorizer=None, right_tfidf_matrix=None):
     """Match a single query using LLM with blocking
     
@@ -1033,6 +1228,275 @@ def llm(df_left, df_right, df_mapping):
     return pd.DataFrame(all_matches)
 
 # =============================================================================
+# GENERALIZED LLM MATCHING (supports multiple providers and prompts)
+# =============================================================================
+
+def _save_checkpoint(all_matches, total_cost, checkpoint_path):
+    """Save current progress to a parquet checkpoint file."""
+    from pathlib import Path
+    Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(all_matches)
+    df['total_cost_usd'] = total_cost
+    df.to_parquet(checkpoint_path, index=False)
+
+def _llm_match_single_generic(query_row, df_candidates, id_col_candidates, name_col_candidates,
+                               top_k, max_text_length, vectorizer, right_tfidf_matrix,
+                               api_caller, prompt_template):
+    """Generic single-query LLM match. Works with any API caller and prompt."""
+    query_text = query_row['text']
+
+    # TF-IDF blocking
+    from sklearn.metrics.pairwise import cosine_similarity as cos_sim
+    query_tfidf = vectorizer.transform([query_text])
+    similarities = cos_sim(query_tfidf, right_tfidf_matrix).flatten()
+    candidate_indices = similarities.argsort()[::-1][:top_k]
+
+    candidates_with_scores = []
+    for idx in candidate_indices:
+        row = df_candidates.iloc[idx]
+        cand_id = str(row[id_col_candidates])
+        cand_name = row[get_display_column(df_candidates)]
+        candidates_with_scores.append((similarities[idx], idx, cand_id, cand_name, row['text']))
+
+    top_candidates = candidates_with_scores[:top_k]
+    if not top_candidates:
+        return None, None, 0.0, 0.0
+
+    # Truncate text
+    if max_text_length > 0 and len(query_text) > max_text_length:
+        query_text = query_text[:max_text_length] + "..."
+
+    candidates_text = ""
+    for i, (sim, idx, cand_id, cand_name, cand_text) in enumerate(top_candidates, 1):
+        if max_text_length > 0 and len(cand_text) > max_text_length:
+            cand_text = cand_text[:max_text_length] + "..."
+        candidates_text += f"{i}. {cand_text}\n\n"
+
+    prompt = prompt_template.format(query_text=query_text, candidates_text=candidates_text)
+
+    try:
+        answer, cost = api_caller(prompt)
+        matched_id, matched_name, confidence = _parse_llm_response(answer, top_candidates)
+        return matched_id, matched_name, confidence, cost
+    except Exception as e:
+        print(f"    Error: {str(e)}")
+        return None, None, 0.0, 0.0
+
+
+def _run_llm_method(df_left, df_right, df_mapping, api_caller, method_label, prompt_template,
+                    checkpoint_path=None):
+    """Full LLM matching pipeline: blocking + LLM classification + threshold optimization.
+    Shared by all LLM variants (GPT-4o-mini, Claude, token-fallback prompts).
+
+    Saves a checkpoint after every record so progress survives crashes."""
+    import time as _time
+    import json
+
+    print(f"\nRunning {method_label}...")
+    print("This is EXPENSIVE - check cost estimates before running")
+
+    df_left = prepare_text_column(df_left.copy(), title_only=TITLE_ONLY_MODE)
+    df_right = prepare_text_column(df_right.copy(), title_only=TITLE_ONLY_MODE)
+
+    id_col_left = df_left.columns[0]
+    id_col_right = df_right.columns[0]
+    name_col_left = get_display_column(df_left)
+    name_col_right = get_display_column(df_right)
+
+    true_matches = create_ground_truth_set(df_mapping)
+    has_truth = {la: True for (la, rb) in true_matches}
+
+    # Adaptive top_k
+    total_candidates = len(df_right)
+    if total_candidates < 2000:
+        top_k = 50
+    elif total_candidates < 10000:
+        top_k = 100
+    else:
+        top_k = 200
+    max_text_length = 2000
+
+    print(f"Parameters: top_k={top_k} ({100*top_k/total_candidates:.2f}% of {total_candidates:,} candidates)")
+
+    # Pre-compute TF-IDF blocking vectors
+    print("Pre-computing TF-IDF vectors for blocking...")
+    from sklearn.feature_extraction.text import TfidfVectorizer as _TV
+    vectorizer = _TV()
+    vectorizer.fit(pd.concat([df_left['text'], df_right['text']]))
+    right_tfidf_matrix = vectorizer.transform(df_right['text'])
+
+    # Resume from checkpoint if it exists
+    # Only keep records that have real results (non-empty prediction OR non-zero
+    # similarity score).  Failed API calls produce pred_id_right='' AND
+    # similarity_score=0; dropping them lets the retry loop pick them up again.
+    all_matches = []
+    total_cost = 0.0
+    completed_ids = set()
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        checkpoint_df = pd.read_parquet(checkpoint_path)
+        has_result = (checkpoint_df['pred_id_right'].astype(str).ne('') |
+                      checkpoint_df['similarity_score'].fillna(0).gt(0))
+        checkpoint_df = checkpoint_df[has_result]
+        all_matches = checkpoint_df.to_dict('records')
+        completed_ids = set(checkpoint_df['id_left'].astype(str))
+        total_cost = float(checkpoint_df['total_cost_usd'].iloc[0]) if 'total_cost_usd' in checkpoint_df.columns and len(checkpoint_df) > 0 else 0.0
+        print(f"Resumed from checkpoint: {len(completed_ids)} records with valid results (dropped failed rows)")
+
+    wall_start = _time.time()
+    records_this_run = 0
+
+    for idx_a, row_a in tqdm(df_left.iterrows(), total=len(df_left), desc=f"{method_label}"):
+        id_a = str(row_a[id_col_left])
+
+        # Skip already-completed records
+        if id_a in completed_ids:
+            continue
+
+        name_a = row_a[name_col_left]
+        true_matches_for_a = [r for (l, r) in true_matches if l == id_a]
+        true_id_b = true_matches_for_a[0] if true_matches_for_a else None
+
+        matched_id, matched_name, confidence, cost = _llm_match_single_generic(
+            row_a, df_right, id_col_right, name_col_right,
+            top_k, max_text_length, vectorizer, right_tfidf_matrix,
+            api_caller, prompt_template
+        )
+        total_cost += cost
+        records_this_run += 1
+
+        all_matches.append({
+            'id_left': id_a,
+            'left_name': name_a,
+            'true_id_right': true_id_b if true_id_b else '',
+            'pred_id_right': matched_id if matched_id else '',
+            'pred_right_name': matched_name if matched_name else '',
+            'similarity_score': confidence
+        })
+
+        # Save checkpoint every 10 records
+        if checkpoint_path and records_this_run % 10 == 0:
+            _save_checkpoint(all_matches, total_cost, checkpoint_path)
+
+    # Final checkpoint save
+    if checkpoint_path:
+        _save_checkpoint(all_matches, total_cost, checkpoint_path)
+
+    wall_elapsed = _time.time() - wall_start
+    print(f"\nTotal cost: ${total_cost:.2f}")
+    print(f"Wall time: {wall_elapsed:.0f}s ({wall_elapsed/60:.1f}min)")
+
+    # Optimize confidence threshold
+    print("\nOptimizing confidence threshold...")
+    thresholds = np.arange(0.05, 0.96, 0.05)
+    best_threshold = 0.5
+    best_f1 = 0.0
+
+    for threshold in thresholds:
+        tp = fp = fn = 0
+        for match in all_matches:
+            pred_match = (match['pred_id_right'] != '' and
+                         match['similarity_score'] >= threshold)
+            id_a = match['id_left']
+            id_b = match['pred_id_right']
+            true_match = (id_a, id_b) in true_matches
+            left_has_truth = has_truth.get(id_a, False)
+
+            if pred_match and true_match:
+                tp += 1
+            elif pred_match and not true_match:
+                fp += 1
+            if left_has_truth and not (pred_match and true_match):
+                fn += 1
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+        print(f"  Threshold {threshold:.2f}: F1={f1:.3f}")
+
+        if f1 > best_f1:
+            best_f1 = f1
+            best_threshold = threshold
+
+    print(f"\nBest threshold: {best_threshold:.2f} (F1={best_f1:.3f})")
+
+    for match in all_matches:
+        pred_match = (match['pred_id_right'] != '' and
+                     match['similarity_score'] >= best_threshold)
+        true_match = (match['id_left'], match['pred_id_right']) in true_matches
+        match['predicted_match'] = 1 if pred_match else 0
+        match['is_correct'] = int(pred_match and true_match)
+
+    results_df = pd.DataFrame(all_matches)
+    results_df['total_cost_usd'] = total_cost
+    results_df['wall_time_seconds'] = wall_elapsed
+    return results_df
+
+
+# --- New LLM method wrappers ---
+
+def llm_claude(df_left, df_right, df_mapping, output_path=None):
+    """Claude Sonnet 4.6 with TF-IDF blocking (standard prompt)."""
+    return _run_llm_method(
+        df_left, df_right, df_mapping,
+        api_caller=_call_anthropic,
+        method_label="LLM (Claude Sonnet 4.6)",
+        prompt_template=PROMPT_STANDARD,
+        checkpoint_path=output_path
+    )
+
+def llm_gpt4o(df_left, df_right, df_mapping, output_path=None):
+    """GPT-4o with TF-IDF blocking (standard prompt)."""
+    return _run_llm_method(
+        df_left, df_right, df_mapping,
+        api_caller=_call_openai_gpt4o,
+        method_label="LLM (GPT-4o)",
+        prompt_template=PROMPT_STANDARD,
+        checkpoint_path=output_path
+    )
+
+def llm_gpt4o_mini_token_fallback(df_left, df_right, df_mapping, output_path=None):
+    """GPT-4o-mini with TF-IDF blocking (token-fallback prompt)."""
+    return _run_llm_method(
+        df_left, df_right, df_mapping,
+        api_caller=_call_openai,
+        method_label="LLM (GPT-4o-mini, token-fallback prompt)",
+        prompt_template=PROMPT_TOKEN_FALLBACK,
+        checkpoint_path=output_path
+    )
+
+def llm_claude_token_fallback(df_left, df_right, df_mapping, output_path=None):
+    """Claude Sonnet 4.6 with TF-IDF blocking (token-fallback prompt)."""
+    return _run_llm_method(
+        df_left, df_right, df_mapping,
+        api_caller=_call_anthropic,
+        method_label="LLM (Claude Sonnet 4.6, token-fallback prompt)",
+        prompt_template=PROMPT_TOKEN_FALLBACK,
+        checkpoint_path=output_path
+    )
+
+def llm_haiku(df_left, df_right, df_mapping, output_path=None):
+    """Claude Haiku 4.5 with TF-IDF blocking (standard prompt)."""
+    return _run_llm_method(
+        df_left, df_right, df_mapping,
+        api_caller=_call_anthropic_haiku,
+        method_label="LLM (Claude Haiku 4.5)",
+        prompt_template=PROMPT_STANDARD,
+        checkpoint_path=output_path
+    )
+
+def llm_haiku_token_fallback(df_left, df_right, df_mapping, output_path=None):
+    """Claude Haiku 4.5 with TF-IDF blocking (token-fallback prompt)."""
+    return _run_llm_method(
+        df_left, df_right, df_mapping,
+        api_caller=_call_anthropic_haiku,
+        method_label="LLM (Claude Haiku 4.5, token-fallback prompt)",
+        prompt_template=PROMPT_TOKEN_FALLBACK,
+        checkpoint_path=output_path
+    )
+
+
+# =============================================================================
 # METHOD REGISTRY
 # =============================================================================
 
@@ -1044,7 +1508,13 @@ METHODS = {
     'soft_tfidf': soft_tfidf,
     'sentence_transformer': sentence_transformer,
     'openai_embeddings': openai_embeddings,
-    'llm': llm
+    'llm': llm,
+    'llm_gpt4o': llm_gpt4o,
+    'llm_claude': llm_claude,
+    'llm_gpt4o_mini_token_fallback': llm_gpt4o_mini_token_fallback,
+    'llm_claude_token_fallback': llm_claude_token_fallback,
+    'llm_haiku': llm_haiku,
+    'llm_haiku_token_fallback': llm_haiku_token_fallback,
 }
 
 if __name__ == "__main__":

@@ -12,8 +12,13 @@ Usage:
 
 import pandas as pd
 from pathlib import Path
-import matplotlib.pyplot as plt
-import seaborn as sns
+
+try:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    HAS_PLOT = True
+except ImportError:
+    HAS_PLOT = False
 
 def load_all_results(results_dir='results'):
     """Load all parquet files into single dataframe"""
@@ -66,7 +71,7 @@ def compute_metrics(df):
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
         
-        metrics.append({
+        row = {
             'method': method,
             'transformation': transformation,
             'dataset': dataset,
@@ -79,7 +84,15 @@ def compute_metrics(df):
             'total_records': len(group),
             'true_matches': has_gt.sum(),
             'predicted_matches': (group['predicted_match'] == 1).sum()
-        })
+        }
+
+        # Add cost/latency if available
+        if 'total_cost_usd' in group.columns and group['total_cost_usd'].notna().any():
+            row['cost_usd'] = group['total_cost_usd'].iloc[0]
+        if 'wall_time_seconds' in group.columns and group['wall_time_seconds'].notna().any():
+            row['wall_time_seconds'] = group['wall_time_seconds'].iloc[0]
+
+        metrics.append(row)
     
     return pd.DataFrame(metrics)
 
@@ -213,7 +226,10 @@ def main():
     
     if df_all is None:
         return
-    
+
+    # Drop rows without required metadata (incomplete checkpoints)
+    df_all = df_all.dropna(subset=['method', 'dataset', 'transformation'])
+
     print(f"\n   Total records loaded: {len(df_all)}")
     print(f"   Methods: {sorted(df_all['method'].unique().tolist())}")
     print(f"   Transformations: {sorted(df_all['transformation'].unique().tolist())}")
@@ -234,8 +250,11 @@ def main():
     print_summary(metrics_df)
     
     # Create plots
-    print("\n3. Creating visualizations...")
-    plot_results(metrics_df)
+    if HAS_PLOT:
+        print("\n3. Creating visualizations...")
+        plot_results(metrics_df)
+    else:
+        print("\n3. Skipping plots (matplotlib not installed)")
     
     # Export
     print("\n4. Exporting summary...")
