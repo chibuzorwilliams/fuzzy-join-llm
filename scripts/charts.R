@@ -90,8 +90,13 @@ group_header <- function(label) {
     theme(plot.background = element_rect(fill = '#555555', color = NA))
 }
 
-f1_panel <- function(ablations, baseline, show_x = FALSE) {
-  p <- ablations %>%
+f1_panel <- function(ablations, baseline, show_x = FALSE, show_pct = FALSE) {
+  d <- ablations %>%
+    left_join(baseline %>% select(method, dataset, f1_baseline), by = c('method', 'dataset')) %>%
+    mutate(pct_label = sprintf('%+.0f%%', (f1_mean - f1_baseline) / f1_baseline * 100)) %>%
+    arrange(method, dataset, transformation)
+
+  p <- d %>%
     ggplot(aes(x = f1_mean, y = transformation, color = transformation)) +
     geom_rect(
       data = baseline, inherit.aes = FALSE,
@@ -106,7 +111,7 @@ f1_panel <- function(ablations, baseline, show_x = FALSE) {
     ) +
     geom_point(size = 1.6) +
     facet_grid(method ~ dataset) +
-    scale_x_continuous(limits = c(0, 1)) +
+    scale_x_continuous(limits = c(0, 1), expand = expansion(add = c(0.12, 0.02))) +
     labs(x = if (show_x) 'F1 Score' else NULL, y = 'Transformation') +
     theme_minimal_vgrid(font_family = font, font_size = 16) +
     theme(
@@ -117,6 +122,15 @@ f1_panel <- function(ablations, baseline, show_x = FALSE) {
       plot.background = element_rect(fill = 'white', color = NA)
     ) +
     panel_border()
+
+  if (show_pct) {
+    p <- p +
+      geom_text(
+        aes(label = pct_label, x = f1_mean - f1_std),
+        hjust = 1.1, vjust = 0.5, size = 2.5, color = 'grey20', show.legend = FALSE
+      )
+  }
+  p <- p + coord_cartesian(clip = 'off')
   if (!show_x) p <- p + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
   p
 }
@@ -129,7 +143,7 @@ plot_grid(
   f1_panel(
     cv_ablations %>% filter(method_group == 'LLM / Embeddings'),
     cv_baseline  %>% filter(method_group == 'LLM / Embeddings'),
-    show_x = FALSE
+    show_x = FALSE, show_pct = TRUE
   ),
   group_header('String Distance'),
   f1_panel(
@@ -248,7 +262,13 @@ robustness_baseline <- cv_robustness %>%
 
 robustness_ablations <- cv_robustness %>%
   filter(transformation != 'Original') %>%
-  mutate(transformation = fct_drop(transformation))
+  mutate(transformation = fct_drop(transformation)) %>%
+  left_join(robustness_baseline %>% select(tier, dataset, f1_baseline), by = c('tier', 'dataset')) %>%
+  mutate(pct_label = if_else(
+    is.na(f1_mean), NA_character_,
+    sprintf('%+.0f%%', (f1_mean - f1_baseline) / f1_baseline * 100)
+  )) %>%
+  arrange(tier, dataset, transformation)
 
 robustness_ablations %>%
   ggplot(aes(x = f1_mean, y = transformation)) +
@@ -275,12 +295,17 @@ robustness_ablations %>%
     linewidth = 0.5
   ) +
   geom_point(size = 2.5) +
+  geom_text(
+    aes(label = pct_label, x = f1_mean - f1_std),
+    hjust = 1.1, vjust = 0.5, size = 3, color = 'grey20', show.legend = FALSE
+  ) +
   facet_grid(tier ~ dataset) +
-  scale_x_continuous(limits = c(0, 1)) +
+  scale_x_continuous(limits = c(0, 1), expand = expansion(add = c(0.12, 0.02))) +
   labs(
     x = 'F1 Score',
     y = 'Transformation'
   ) +
+  coord_cartesian(clip = 'off') +
   theme_minimal_vgrid(font_family = font, font_size = 14) +
   theme(
     strip.background = element_rect("grey80"),
@@ -309,11 +334,11 @@ cv_raw <- read_csv(file.path('results', 'cv_results.csv'))
 
 # Map raw method names to model family + prompt variant
 llm_lookup <- tribble(
-  ~method                         , ~model         , ~prompt          ,
-  'llm'                           , 'GPT-4o-mini'  , 'Standard'       ,
-  'llm_gpt4o_mini_token_fallback' , 'GPT-4o-mini'  , 'Token Fallback' ,
-  'llm_haiku'                     , 'Claude Haiku' , 'Standard'       ,
-  'llm_haiku_token_fallback'      , 'Claude Haiku' , 'Token Fallback' ,
+  ~method                         , ~model         , ~prompt    ,
+  'llm'                           , 'GPT-4o-mini'  , 'Semantic' ,
+  'llm_gpt4o_mini_token_fallback' , 'GPT-4o-mini'  , 'Lexical'  ,
+  'llm_haiku'                     , 'Claude Haiku' , 'Semantic' ,
+  'llm_haiku_token_fallback'      , 'Claude Haiku' , 'Lexical'  ,
 )
 
 cv_llm <- cv_raw %>%
@@ -326,16 +351,21 @@ cv_llm <- cv_raw %>%
       transformation,
       levels = c('Scrambled', 'Ciphered Words', 'Ciphered Letters', 'Original')
     ),
-    prompt = factor(prompt, levels = c('Standard', 'Token Fallback'))
+    prompt = factor(prompt, levels = c('Semantic', 'Lexical'))
   )
 
 llm_baseline <- cv_llm %>%
-  filter(transformation == 'Original', prompt == 'Standard') %>%
+  filter(transformation == 'Original', prompt == 'Semantic') %>%
   select(model, dataset, f1_baseline = f1_mean, sd_baseline = f1_std)
 
 llm_ablations <- cv_llm %>%
   filter(transformation != 'Original') %>%
-  mutate(transformation = fct_drop(transformation))
+  mutate(transformation = fct_drop(transformation)) %>%
+  left_join(llm_baseline %>% select(model, dataset, f1_baseline), by = c('model', 'dataset')) %>%
+  mutate(
+    pct_label = sprintf('%+.0f%%', (f1_mean - f1_baseline) / f1_baseline * 100)
+  ) %>%
+  arrange(model, dataset, prompt, transformation)
 
 llm_ablations %>%
   ggplot(aes(x = f1_mean, y = transformation, color = prompt)) +
@@ -363,16 +393,22 @@ llm_ablations %>%
     position = position_dodge(width = 0.5)
   ) +
   geom_point(size = 2.5, position = position_dodge(width = 0.5)) +
+  geom_text(
+    aes(label = pct_label, x = f1_mean - f1_std, group = prompt),
+    hjust = 1.1, vjust = 0.5, size = 2.8, color = 'grey20', show.legend = FALSE,
+    position = position_dodge(width = 0.5)
+  ) +
   facet_grid(model ~ dataset) +
-  scale_x_continuous(limits = c(0, 1)) +
+  scale_x_continuous(limits = c(0, 1), expand = expansion(add = c(0.14, 0.02))) +
   scale_color_manual(
-    values = c('Standard' = '#2166ac', 'Token Fallback' = '#b2182b')
+    values = c('Semantic' = '#2166ac', 'Lexical' = '#b2182b')
   ) +
   labs(
     x = 'F1 Score',
     y = 'Transformation',
     color = 'Prompt'
   ) +
+  coord_cartesian(clip = 'off') +
   theme_minimal_vgrid(font_family = font, font_size = 14) +
   theme(
     strip.background = element_rect("grey80"),
