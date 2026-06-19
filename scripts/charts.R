@@ -163,10 +163,12 @@ ggsave(
 )
 
 # ---------------------------------------------------------------------------
-# Plot 2: Precision-recall scatter (point estimates from summary.csv).
-# Excludes expensive models.
+# Plot 2: Precision-recall scatter (threshold-optimized, cross-validated
+# operating point from cv_results.csv, consistent with the F1 figure and
+# Tables S1-S4). Excludes expensive models.
 # ---------------------------------------------------------------------------
-df <- read_csv(file.path('results', 'summary.csv')) %>%
+df <- read_csv(file.path('results', 'cv_results.csv')) %>%
+  rename(f1 = f1_mean) %>%
   filter(!method %in% expensive_methods) %>%
   mutate(method_group = if_else(
     method %in% llm_methods_raw, 'LLM / Embeddings', 'String Distance'
