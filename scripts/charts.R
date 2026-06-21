@@ -40,7 +40,12 @@ expensive_methods <- c(
 )
 
 # LLM/embedding methods (raw names) — used to assign method_group in main plots
-llm_methods_raw <- c('llm', 'llm_haiku', 'openai_embeddings', 'sentence_transformer')
+llm_methods_raw <- c(
+  'llm',
+  'llm_haiku',
+  'openai_embeddings',
+  'sentence_transformer'
+)
 
 # ---------------------------------------------------------------------------
 # Plot 1: F1 by transformation, with 5-fold CV error bars (mean +/- 1 SD).
@@ -48,9 +53,13 @@ llm_methods_raw <- c('llm', 'llm_haiku', 'openai_embeddings', 'sentence_transfor
 # ---------------------------------------------------------------------------
 cv <- read_csv(file.path('results', 'cv_results.csv')) %>%
   filter(!method %in% expensive_methods) %>%
-  mutate(method_group = if_else(
-    method %in% llm_methods_raw, 'LLM / Embeddings', 'String Distance'
-  )) %>%
+  mutate(
+    method_group = if_else(
+      method %in% llm_methods_raw,
+      'Semantic Methods',
+      'Lexical Methods'
+    )
+  ) %>%
   clean_labels() %>%
   group_by(method, dataset) %>%
   mutate(max_f1 = max(f1_mean)) %>%
@@ -60,7 +69,9 @@ cv <- read_csv(file.path('results', 'cv_results.csv')) %>%
 cv_method_order <- cv %>%
   distinct(method, method_group) %>%
   left_join(
-    cv %>% group_by(method) %>% summarise(top_f1 = max(max_f1), .groups = 'drop'),
+    cv %>%
+      group_by(method) %>%
+      summarise(top_f1 = max(max_f1), .groups = 'drop'),
     by = 'method'
   ) %>%
   arrange(method_group, desc(top_f1)) %>%
@@ -68,7 +79,7 @@ cv_method_order <- cv %>%
 
 cv <- cv %>%
   mutate(
-    method_group = factor(method_group, levels = c('LLM / Embeddings', 'String Distance')),
+    method_group = factor(method_group, levels = c('Semantic Methods', 'Lexical Methods')),
     method = factor(method, levels = cv_method_order),
     transformation = factor(
       transformation,
@@ -78,7 +89,13 @@ cv <- cv %>%
 
 cv_baseline <- cv %>%
   filter(transformation == 'Original') %>%
-  select(method, method_group, dataset, f1_baseline = f1_mean, sd_baseline = f1_std)
+  select(
+    method,
+    method_group,
+    dataset,
+    f1_baseline = f1_mean,
+    sd_baseline = f1_std
+  )
 
 cv_ablations <- cv %>%
   filter(transformation != 'Original') %>%
@@ -86,32 +103,57 @@ cv_ablations <- cv %>%
 
 group_header <- function(label) {
   ggdraw() +
-    draw_label(label, fontface = 'bold', color = 'white', fontfamily = font, size = 14) +
+    draw_label(
+      label,
+      fontface = 'bold',
+      color = 'white',
+      fontfamily = font,
+      size = 14
+    ) +
     theme(plot.background = element_rect(fill = '#555555', color = NA))
 }
 
 f1_panel <- function(ablations, baseline, show_x = FALSE, show_pct = FALSE) {
   d <- ablations %>%
-    left_join(baseline %>% select(method, dataset, f1_baseline), by = c('method', 'dataset')) %>%
-    mutate(pct_label = sprintf('%+.0f%%', (f1_mean - f1_baseline) / f1_baseline * 100)) %>%
+    left_join(
+      baseline %>% select(method, dataset, f1_baseline),
+      by = c('method', 'dataset')
+    ) %>%
+    mutate(
+      pct_label = sprintf(
+        '%+.0f%%',
+        (f1_mean - f1_baseline) / f1_baseline * 100
+      )
+    ) %>%
     arrange(method, dataset, transformation)
 
   p <- d %>%
     ggplot(aes(x = f1_mean, y = transformation, color = transformation)) +
     geom_rect(
-      data = baseline, inherit.aes = FALSE,
-      aes(xmin = f1_baseline - sd_baseline, xmax = f1_baseline + sd_baseline,
-          ymin = -Inf, ymax = Inf),
-      fill = 'grey70', alpha = 0.35
+      data = baseline,
+      inherit.aes = FALSE,
+      aes(
+        xmin = f1_baseline - sd_baseline,
+        xmax = f1_baseline + sd_baseline,
+        ymin = -Inf,
+        ymax = Inf
+      ),
+      fill = 'grey70',
+      alpha = 0.35
     ) +
     geom_vline(data = baseline, aes(xintercept = f1_baseline)) +
     geom_errorbarh(
       aes(xmin = f1_mean - f1_std, xmax = f1_mean + f1_std),
-      height = 0.3, alpha = 0.9, linewidth = 0.5
+      height = 0.3,
+      alpha = 0.9,
+      linewidth = 0.5
     ) +
     geom_point(size = 1.6) +
     facet_grid(method ~ dataset) +
-    scale_x_continuous(limits = c(0, 1), expand = expansion(add = c(0.12, 0.02))) +
+    scale_x_continuous(
+      limits = c(0, 1),
+      expand = expansion(add = c(0.12, 0.02))
+    ) +
     labs(x = if (show_x) 'F1 Score' else NULL, y = 'Transformation') +
     theme_minimal_vgrid(font_family = font, font_size = 16) +
     theme(
@@ -127,33 +169,44 @@ f1_panel <- function(ablations, baseline, show_x = FALSE, show_pct = FALSE) {
     p <- p +
       geom_text(
         aes(label = pct_label, x = f1_mean - f1_std),
-        hjust = 1.1, vjust = 0.5, size = 2.5, color = 'grey20', show.legend = FALSE
+        hjust = 1.1,
+        vjust = 0.5,
+        size = 2.5,
+        color = 'grey20',
+        show.legend = FALSE
       )
   }
   p <- p + coord_cartesian(clip = 'off')
-  if (!show_x) p <- p + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+  if (!show_x) {
+    p <- p +
+      theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+  }
   p
 }
 
-n_llm <- n_distinct(cv_ablations$method[cv_ablations$method_group == 'LLM / Embeddings'])
-n_str <- n_distinct(cv_ablations$method[cv_ablations$method_group == 'String Distance'])
+n_llm <- n_distinct(cv_ablations$method[
+  cv_ablations$method_group == 'Semantic Methods'
+])
+n_str <- n_distinct(cv_ablations$method[cv_ablations$method_group == 'Lexical Methods'])
 
 plot_grid(
-  group_header('LLM / Embeddings'),
+  group_header('Semantic Methods'),
   f1_panel(
-    cv_ablations %>% filter(method_group == 'LLM / Embeddings'),
-    cv_baseline  %>% filter(method_group == 'LLM / Embeddings'),
-    show_x = FALSE, show_pct = TRUE
+    cv_ablations %>% filter(method_group == 'Semantic Methods'),
+    cv_baseline %>% filter(method_group == 'Semantic Methods'),
+    show_x = FALSE,
+    show_pct = TRUE
   ),
-  group_header('String Distance'),
+  group_header('Lexical Methods'),
   f1_panel(
-    cv_ablations %>% filter(method_group == 'String Distance'),
-    cv_baseline  %>% filter(method_group == 'String Distance'),
+    cv_ablations %>% filter(method_group == 'Lexical Methods'),
+    cv_baseline %>% filter(method_group == 'Lexical Methods'),
     show_x = TRUE
   ),
   ncol = 1,
   rel_heights = c(0.2, n_llm, 0.2, n_str),
-  align = 'v', axis = 'lr'
+  align = 'v',
+  axis = 'lr'
 )
 
 ggsave(
@@ -170,9 +223,13 @@ ggsave(
 df <- read_csv(file.path('results', 'cv_results.csv')) %>%
   rename(f1 = f1_mean) %>%
   filter(!method %in% expensive_methods) %>%
-  mutate(method_group = if_else(
-    method %in% llm_methods_raw, 'LLM / Embeddings', 'String Distance'
-  )) %>%
+  mutate(
+    method_group = if_else(
+      method %in% llm_methods_raw,
+      'Semantic Methods',
+      'Lexical Methods'
+    )
+  ) %>%
   clean_labels() %>%
   group_by(method, dataset) %>%
   mutate(max_f1 = max(f1)) %>%
@@ -181,7 +238,9 @@ df <- read_csv(file.path('results', 'cv_results.csv')) %>%
 df_method_order <- df %>%
   distinct(method, method_group) %>%
   left_join(
-    df %>% group_by(method) %>% summarise(top_f1 = max(max_f1), .groups = 'drop'),
+    df %>%
+      group_by(method) %>%
+      summarise(top_f1 = max(max_f1), .groups = 'drop'),
     by = 'method'
   ) %>%
   arrange(method_group, desc(top_f1)) %>%
@@ -189,7 +248,7 @@ df_method_order <- df %>%
 
 df <- df %>%
   mutate(
-    method_group = factor(method_group, levels = c('LLM / Embeddings', 'String Distance')),
+    method_group = factor(method_group, levels = c('Semantic Methods', 'Lexical Methods')),
     method = factor(method, levels = df_method_order),
     transformation = fct_reorder(transformation, -f1)
   )
@@ -215,17 +274,18 @@ pr_panel <- function(data, show_legend = FALSE) {
   p
 }
 
-n_llm_pr <- n_distinct(df$method[df$method_group == 'LLM / Embeddings'])
-n_str_pr <- n_distinct(df$method[df$method_group == 'String Distance'])
+n_llm_pr <- n_distinct(df$method[df$method_group == 'Semantic Methods'])
+n_str_pr <- n_distinct(df$method[df$method_group == 'Lexical Methods'])
 
 plot_grid(
-  group_header('LLM / Embeddings'),
-  pr_panel(df %>% filter(method_group == 'LLM / Embeddings'), show_legend = FALSE),
-  group_header('String Distance'),
-  pr_panel(df %>% filter(method_group == 'String Distance'), show_legend = TRUE),
+  group_header('Semantic Methods'),
+  pr_panel(df %>% filter(method_group == 'Semantic Methods'), show_legend = TRUE),
+  group_header('Lexical Methods'),
+  pr_panel(df %>% filter(method_group == 'Lexical Methods'), show_legend = FALSE),
   ncol = 1,
   rel_heights = c(0.2, n_llm_pr, 0.2, n_str_pr),
-  align = 'v', axis = 'lr'
+  align = 'v',
+  axis = 'lr'
 )
 
 ggsave(
@@ -265,11 +325,17 @@ robustness_baseline <- cv_robustness %>%
 robustness_ablations <- cv_robustness %>%
   filter(transformation != 'Original') %>%
   mutate(transformation = fct_drop(transformation)) %>%
-  left_join(robustness_baseline %>% select(tier, dataset, f1_baseline), by = c('tier', 'dataset')) %>%
-  mutate(pct_label = if_else(
-    is.na(f1_mean), NA_character_,
-    sprintf('%+.0f%%', (f1_mean - f1_baseline) / f1_baseline * 100)
-  )) %>%
+  left_join(
+    robustness_baseline %>% select(tier, dataset, f1_baseline),
+    by = c('tier', 'dataset')
+  ) %>%
+  mutate(
+    pct_label = if_else(
+      is.na(f1_mean),
+      NA_character_,
+      sprintf('%+.0f%%', (f1_mean - f1_baseline) / f1_baseline * 100)
+    )
+  ) %>%
   arrange(tier, dataset, transformation)
 
 robustness_ablations %>%
@@ -299,10 +365,17 @@ robustness_ablations %>%
   geom_point(size = 2.5) +
   geom_text(
     aes(label = pct_label, x = f1_mean - f1_std),
-    hjust = 1.1, vjust = 0.5, size = 3, color = 'grey20', show.legend = FALSE
+    hjust = 1.1,
+    vjust = 0.5,
+    size = 3,
+    color = 'grey20',
+    show.legend = FALSE
   ) +
   facet_grid(tier ~ dataset) +
-  scale_x_continuous(limits = c(0, 1), expand = expansion(add = c(0.12, 0.02))) +
+  scale_x_continuous(
+    limits = c(0, 1),
+    expand = expansion(add = c(0.12, 0.02))
+  ) +
   labs(
     x = 'F1 Score',
     y = 'Transformation'
@@ -337,10 +410,10 @@ cv_raw <- read_csv(file.path('results', 'cv_results.csv'))
 # Map raw method names to model family + prompt variant
 llm_lookup <- tribble(
   ~method                         , ~model         , ~prompt    ,
-  'llm'                           , 'GPT-4o-mini'  , 'Semantic' ,
-  'llm_gpt4o_mini_token_fallback' , 'GPT-4o-mini'  , 'Lexical'  ,
-  'llm_haiku'                     , 'Claude Haiku' , 'Semantic' ,
-  'llm_haiku_token_fallback'      , 'Claude Haiku' , 'Lexical'  ,
+  'llm'                           , 'GPT-4o-mini'  , 'Standard' ,
+  'llm_gpt4o_mini_token_fallback' , 'GPT-4o-mini'  , 'Token-Fallback'  ,
+  'llm_haiku'                     , 'Claude Haiku' , 'Standard' ,
+  'llm_haiku_token_fallback'      , 'Claude Haiku' , 'Token-Fallback'  ,
 )
 
 cv_llm <- cv_raw %>%
@@ -353,17 +426,20 @@ cv_llm <- cv_raw %>%
       transformation,
       levels = c('Scrambled', 'Ciphered Words', 'Ciphered Letters', 'Original')
     ),
-    prompt = factor(prompt, levels = c('Semantic', 'Lexical'))
+    prompt = factor(prompt, levels = c('Standard', 'Token-Fallback'))
   )
 
 llm_baseline <- cv_llm %>%
-  filter(transformation == 'Original', prompt == 'Semantic') %>%
+  filter(transformation == 'Original', prompt == 'Standard') %>%
   select(model, dataset, f1_baseline = f1_mean, sd_baseline = f1_std)
 
 llm_ablations <- cv_llm %>%
   filter(transformation != 'Original') %>%
   mutate(transformation = fct_drop(transformation)) %>%
-  left_join(llm_baseline %>% select(model, dataset, f1_baseline), by = c('model', 'dataset')) %>%
+  left_join(
+    llm_baseline %>% select(model, dataset, f1_baseline),
+    by = c('model', 'dataset')
+  ) %>%
   mutate(
     pct_label = sprintf('%+.0f%%', (f1_mean - f1_baseline) / f1_baseline * 100)
   ) %>%
@@ -397,13 +473,20 @@ llm_ablations %>%
   geom_point(size = 2.5, position = position_dodge(width = 0.5)) +
   geom_text(
     aes(label = pct_label, x = f1_mean - f1_std, group = prompt),
-    hjust = 1.1, vjust = 0.5, size = 2.8, color = 'grey20', show.legend = FALSE,
+    hjust = 1.1,
+    vjust = 0.5,
+    size = 2.8,
+    color = 'grey20',
+    show.legend = FALSE,
     position = position_dodge(width = 0.5)
   ) +
   facet_grid(model ~ dataset) +
-  scale_x_continuous(limits = c(0, 1), expand = expansion(add = c(0.14, 0.02))) +
+  scale_x_continuous(
+    limits = c(0, 1),
+    expand = expansion(add = c(0.14, 0.02))
+  ) +
   scale_color_manual(
-    values = c('Semantic' = '#2166ac', 'Lexical' = '#b2182b')
+    values = c('Standard' = '#2166ac', 'Token-Fallback' = '#b2182b')
   ) +
   labs(
     x = 'F1 Score',
